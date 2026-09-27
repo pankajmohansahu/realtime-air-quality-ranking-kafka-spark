@@ -1,0 +1,17 @@
+# Data
+*.csv
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# GCP credentials
+*.json
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

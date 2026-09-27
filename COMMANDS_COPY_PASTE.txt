@@ -1,0 +1,250 @@
+================================================================================
+  OPPE 2 — COMPLETE COPY-PASTE COMMAND GUIDE
+  Project : project-399f087e-fef4-4831-b4e
+  Bucket  : iitm-ibd-oppe2-21f2001203
+  Kafka VM: kafka-vm-oppe2  |  Internal IP: 10.128.0.23  |  External: 34.56.39.5
+  Cluster : oppe2-cluster   |  Region: us-central1       |  Zone: us-central1-a
+================================================================================
+
+TOTAL WINDOWS NEEDED:
+  [CLOUD SHELL TAB 1] — Upload files + get Kafka IP
+  [CLOUD SHELL TAB 2] — Submit Consumer job (start FIRST)
+  [CLOUD SHELL TAB 3] — Submit Producer job (start AFTER consumer)
+  [KAFKA SSH TAB 1]   — Zookeeper (keep running)
+  [KAFKA SSH TAB 2]   — Kafka Broker (keep running)
+  [KAFKA SSH TAB 3]   — Create Topic (one-time, then close)
+
+================================================================================
+  WINDOW 1 — CLOUD SHELL TAB 1
+  Purpose: Upload scripts to GCS + verify
+================================================================================
+
+--- Step 1: Set project ---
+gcloud config set project project-399f087e-fef4-4831-b4e
+
+--- Step 2: Upload producer and consumer scripts ---
+gsutil cp producer.py gs://iitm-ibd-oppe2-21f2001203/scripts/producer.py
+gsutil cp consumer.py gs://iitm-ibd-oppe2-21f2001203/scripts/consumer.py
+
+--- Step 3: Verify all files are on GCS ---
+gsutil ls gs://iitm-ibd-oppe2-21f2001203/
+gsutil ls gs://iitm-ibd-oppe2-21f2001203/scripts/
+
+--- Expected output ---
+gs://iitm-ibd-oppe2-21f2001203/globalAirQuality.csv
+gs://iitm-ibd-oppe2-21f2001203/scripts/
+gs://iitm-ibd-oppe2-21f2001203/scripts/consumer.py
+gs://iitm-ibd-oppe2-21f2001203/scripts/producer.py
+
+
+================================================================================
+  WINDOW 2 — KAFKA SSH TAB 1
+  Purpose: Install Java + Kafka, then START ZOOKEEPER (keep this running)
+  Open new Cloud Shell tab → SSH into Kafka VM
+================================================================================
+
+--- Step 1: SSH into Kafka VM ---
+gcloud compute ssh kafka-vm-oppe2 --zone=us-central1-a
+
+--- Step 2: Install Java and dependencies (wait for it to finish) ---
+sudo apt update -y && sudo apt install -y default-jdk wget netcat-openbsd
+
+--- Step 3: Download and install Kafka ---
+cd ~
+wget https://downloads.apache.org/kafka/3.7.2/kafka_2.13-3.7.2.tgz
+tar -xvzf kafka_2.13-3.7.2.tgz
+mv kafka_2.13-3.7.2 kafka
+echo "Kafka installed successfully!"
+
+--- Step 4: Start Zookeeper (KEEP THIS TERMINAL RUNNING — do not close) ---
+cd ~/kafka && bin/zookeeper-server-start.sh config/zookeeper.properties
+
+>>> Wait until you see: "binding to port 0.0.0.0/0.0.0.0:2181"
+>>> Then open KAFKA SSH TAB 2 in a new window
+
+
+================================================================================
+  WINDOW 3 — KAFKA SSH TAB 2
+  Purpose: Configure server.properties + START KAFKA BROKER (keep running)
+  Open new Cloud Shell tab → SSH into Kafka VM
+================================================================================
+
+--- Step 1: SSH into Kafka VM (new tab) ---
+gcloud compute ssh kafka-vm-oppe2 --zone=us-central1-a
+
+--- Step 2: Auto-detect external IP and configure Kafka ---
+cd ~/kafka
+KAFKA_EXTERNAL_IP=$(curl -s ifconfig.me)
+echo "External IP detected: $KAFKA_EXTERNAL_IP"
+
+--- Step 3: Update listeners in server.properties ---
+grep -q "^listeners=" config/server.properties \
+    && sed -i 's|^listeners=.*|listeners=PLAINTEXT://0.0.0.0:9092|' config/server.properties \
+    || echo "listeners=PLAINTEXT://0.0.0.0:9092" >> config/server.properties
+
+--- Step 4: Update advertised.listeners in server.properties ---
+grep -q "^advertised.listeners=" config/server.properties \
+    && sed -i "s|^advertised.listeners=.*|advertised.listeners=PLAINTEXT://$KAFKA_EXTERNAL_IP:9092|" config/server.properties \
+    || echo "advertised.listeners=PLAINTEXT://$KAFKA_EXTERNAL_IP:9092" >> config/server.properties
+
+--- Step 5: Verify config was written correctly ---
+grep "listeners" config/server.properties
+
+--- Expected output ---
+listeners=PLAINTEXT://0.0.0.0:9092
+advertised.listeners=PLAINTEXT://34.56.39.5:9092
+
+--- Step 6: Start Kafka Broker (KEEP THIS TERMINAL RUNNING — do not close) ---
+bin/kafka-server-start.sh config/server.properties
+
+>>> Wait until you see: "started (kafka.server.KafkaServer)"
+>>> Then open KAFKA SSH TAB 3 to create the topic
+
+
+================================================================================
+  WINDOW 4 — KAFKA SSH TAB 3
+  Purpose: Create Kafka topic (run once, then you can close this tab)
+  Open new Cloud Shell tab → SSH into Kafka VM
+================================================================================
+
+--- Step 1: SSH into Kafka VM (new tab) ---
+gcloud compute ssh kafka-vm-oppe2 --zone=us-central1-a
+
+--- Step 2: Create the topic ---
+cd ~/kafka
+bin/kafka-topics.sh --create \
+    --topic air-quality-topic \
+    --bootstrap-server localhost:9092 \
+    --partitions 1 \
+    --replication-factor 1
+
+--- Step 3: Verify topic exists ---
+bin/kafka-topics.sh --list --bootstrap-server localhost:9092
+
+--- Expected output ---
+air-quality-topic
+
+>>> Topic created successfully! You can close this SSH tab now.
+>>> Now go to CLOUD SHELL TAB 2 to start the Consumer job.
+
+
+================================================================================
+  WINDOW 5 — CLOUD SHELL TAB 2
+  Purpose: Submit Consumer (Spark Structured Streaming) — START THIS FIRST
+  Open new Cloud Shell tab (not SSH — regular Cloud Shell)
+================================================================================
+
+--- Step 1: Get Kafka VM internal IP (confirm it) ---
+KAFKA_IP=$(gcloud compute instances describe kafka-vm-oppe2 \
+    --zone=us-central1-a \
+    --format="get(networkInterfaces[0].networkIP)")
+echo "Kafka Internal IP: $KAFKA_IP"
+
+--- Expected output ---
+Kafka Internal IP: 10.128.0.23
+
+--- Step 2: Submit Consumer job (2-hour window for demo) ---
+gcloud dataproc jobs submit pyspark \
+    gs://iitm-ibd-oppe2-21f2001203/scripts/consumer.py \
+    --cluster=oppe2-cluster \
+    --region=us-central1 \
+    --project=project-399f087e-fef4-4831-b4e \
+    --properties="spark.jars.packages=org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.2" \
+    -- \
+    --kafka-broker 10.128.0.23:9092 \
+    --window-hours 2 \
+    --slide-hours 1
+
+>>> Wait for: "[Consumer] Streaming query started. Waiting for data..."
+>>> Then go to CLOUD SHELL TAB 3 to start the Producer.
+
+
+================================================================================
+  WINDOW 6 — CLOUD SHELL TAB 3
+  Purpose: Submit Producer (PySpark batch) — START AFTER CONSUMER IS RUNNING
+  Open new Cloud Shell tab (not SSH — regular Cloud Shell)
+================================================================================
+
+--- Step 1: Submit Producer job ---
+gcloud dataproc jobs submit pyspark \
+    gs://iitm-ibd-oppe2-21f2001203/scripts/producer.py \
+    --cluster=oppe2-cluster \
+    --region=us-central1 \
+    --project=project-399f087e-fef4-4831-b4e \
+    -- \
+    --kafka-broker 10.128.0.23:9092
+
+>>> Producer will print:
+>>> [Producer] Hour   1 | Timestamp: 2024-... | Sent 50 city records | Total: 50/XXXX
+>>> [Producer] Hour   2 | Timestamp: 2024-... | Sent 50 city records | Total: 100/XXXX
+>>> ...and so on (1 hour of data every 1 second)
+
+
+================================================================================
+  EXPECTED CONSUMER OUTPUT (in CLOUD SHELL TAB 2)
+  You should see this after ~2 hours of data has been produced (2 minutes wait)
+================================================================================
+
+================================================================================
+  EPOCH: 1  |  WINDOW: 2024-XX-XX 00:00:00  -->  2024-XX-XX 02:00:00
+  Cities in window: 50
+================================================================================
+  RANK   CITY                   V1 (Avg AQI)     V2 (Max Spike)   RECORDS
+--------------------------------------------------------------------------------
+  1      Zurich                 71.2500          45.3200          2
+  2      Helsinki               73.1250          52.1100          2
+  3      Stockholm              75.6250          48.9900          2
+  ...
+  50     Delhi                  158.3750         145.2200         2
+================================================================================
+
+
+================================================================================
+  QUICK REFERENCE — WINDOW LAYOUT DURING SCREENCAST
+================================================================================
+
+Arrange your screen like this for the demo recording:
+
+  +---------------------------+---------------------------+
+  |  KAFKA SSH TAB 1          |  KAFKA SSH TAB 2          |
+  |  (Zookeeper running)      |  (Kafka broker running)   |
+  +---------------------------+---------------------------+
+  |  CLOUD SHELL TAB 2        |  CLOUD SHELL TAB 3        |
+  |  (Consumer — streaming    |  (Producer — sending      |
+  |   ranked output)          |   hourly batches)         |
+  +---------------------------+---------------------------+
+
+Show at least 3 consecutive ranked outputs in the Consumer window.
+
+
+================================================================================
+  CLEANUP AFTER EXAM (run in Cloud Shell)
+================================================================================
+
+gcloud dataproc clusters delete oppe2-cluster --region=us-central1 --quiet
+gcloud compute instances delete kafka-vm-oppe2 --zone=us-central1-a --quiet
+
+
+================================================================================
+  TROUBLESHOOTING
+================================================================================
+
+Problem: Consumer fails with "Connection refused" to Kafka
+Fix: Make sure Kafka broker is running in KAFKA SSH TAB 2 first
+
+Problem: Producer fails with "No module named kafka"
+Fix: Cluster was created with kafka-python init action — check cluster creation log
+
+Problem: Consumer shows no output after producer starts
+Fix: Wait ~60 seconds — watermark needs enough data before first window triggers
+
+Problem: "Topic already exists" error when creating topic
+Fix: That's fine, topic already there — move on
+
+Problem: Dataproc job fails with JAR not found
+Fix: Add this flag to job submit:
+     --properties="spark.jars.packages=org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.2"
+
+================================================================================
+  END OF GUIDE
+================================================================================
